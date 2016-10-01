@@ -42,7 +42,7 @@ cl_device_id pick_device() {
 	int i = 0;
 	int err; // error code returned from OpenCL calls
 
-	cl_device_id device_id; // compute device id
+	cl_device_id device_id[2]; // compute device id
 	// Set up platform and GPU device
 
 	cl_uint numPlatforms;
@@ -64,24 +64,34 @@ cl_device_id pick_device() {
 
 	// Secure a GPU
 	for (i = 0; i < numPlatforms; i++) {
-		err = clGetDeviceIDs(Platform[i], DEVICE, 1, &device_id, NULL);
+		err = clGetDeviceIDs(Platform[i], DEVICE, 2, device_id, NULL);
 		if (err == CL_SUCCESS) {
 			break;
 		}
 	}
 
-	if (device_id == NULL)
+	if (device_id[0] == NULL)
 		checkError(err, "Finding a device");
 
-	err = output_device_info(device_id);
+	err = output_device_info(device_id[1]);
 	checkError(err, "Printing device output");
-	return device_id;
+	return device_id[0];
+}
+
+void write_buf(char *path, void *buf, size_t size) {
+	FILE *file = fopen(path, "w");
+	if (file == NULL) {
+		perror("open");
+		return;
+	}
+	if (fwrite(buf, 1, size, file) != size) {
+		perror("write");
+	}
+	fclose(file);
 }
 
 int main(int argc, char **argv) {
 	int err; // error code returned from OpenCL calls
-
-	size_t global; // global domain size
 
 	cl_device_id device_id;	// compute device id
 	cl_context context;		   // compute context
@@ -123,26 +133,26 @@ int main(int argc, char **argv) {
 	ko_vadd = clCreateKernel(program, "vadd", &err);
 	checkError(err, "Creating kernel");
 
-	cl_mem data_buf; // device memory used for the input  a vector
-	cl_mem key_buf;  // device memory used for the input  b vector
-	// Create the input (a, b) and output (c) arrays in device memory
 	size_t data_length = 0;
-	char *data = read_kernel("add_kernel.cl", &data_length);
-	char *key = "hello";
-	size_t key_length = strlen(key);
+	size_t key_length = 0;
+	char *data = read_kernel("encrypted.cl", &data_length);
+	char *key = read_kernel("key.key", &key_length);
 
-	data_buf =
+	cl_mem data_buf =
 		clCreateBuffer(context, CL_MEM_READ_WRITE, data_length, NULL, &err);
 	checkError(err, "Creating buffer data_buf");
 
-	key_buf = clCreateBuffer(context, CL_MEM_READ_ONLY, key_length, NULL, &err);
-	checkError(err, "Creating buffer key_buf");
-
-	// Write a and b vectors into compute device memory
 	err = clEnqueueWriteBuffer(commands, data_buf, CL_TRUE, 0, data_length,
 							   data, 0, NULL, NULL);
 	checkError(err, "Copying h_a to device at d_a");
-	printf("Keylen %lu\n", key_length);
+
+	printf("Keylen %lu, data_len %lu, key ptr %p\n", key_length, data_length,
+		   key);
+
+	cl_mem key_buf =
+		clCreateBuffer(context, CL_MEM_READ_ONLY, key_length, NULL, &err);
+	checkError(err, "Creating buffer key_buf");
+
 	err = clEnqueueWriteBuffer(commands, key_buf, CL_TRUE, 0, key_length, key,
 							   0, NULL, NULL);
 	checkError(err, "Copying h_b to device at d_b");
@@ -150,17 +160,16 @@ int main(int argc, char **argv) {
 	// Set the arguments to our compute kernel
 	err = clSetKernelArg(ko_vadd, 0, sizeof(cl_mem), &data_buf);
 	err |= clSetKernelArg(ko_vadd, 1, sizeof(cl_mem), &key_buf);
-	err |= clSetKernelArg(ko_vadd, 2, sizeof(unsigned int), &data_length);
-	err |= clSetKernelArg(ko_vadd, 3, sizeof(unsigned int), &key_length);
+	err |= clSetKernelArg(ko_vadd, 2, sizeof(unsigned int), &key_length);
+	err |= clSetKernelArg(ko_vadd, 3, sizeof(unsigned int), &data_length);
 	checkError(err, "Setting kernel arguments");
 
 	double rtime = wtime();
 
 	// Execute the kernel over the entire range of our 1d input data set
 	// letting the OpenCL runtime choose the work-group size
-	global = data_length;
-	err = clEnqueueNDRangeKernel(commands, ko_vadd, 1, NULL, &global, NULL, 0,
-								 NULL, NULL);
+	err = clEnqueueNDRangeKernel(commands, ko_vadd, 1, NULL, &data_length, NULL,
+								 0, NULL, NULL);
 	checkError(err, "Enqueueing kernel");
 
 	// Wait for the commands to complete before stopping the timer
@@ -177,6 +186,8 @@ int main(int argc, char **argv) {
 		printf("Error: Failed to read output array!\n%s\n", err_code(err));
 		exit(1);
 	}
+
+	write_buf("decrypted.cl", data, data_length);
 
 	// cleanup then shutdown
 	clReleaseMemObject(data_buf);
