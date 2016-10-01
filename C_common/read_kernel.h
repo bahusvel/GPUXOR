@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-char *read_kernel(char *path) {
+char *read_kernel(char *path, size_t *size) {
 	FILE *file = fopen(path, "r");
 	if (file == NULL) {
 		perror("open");
@@ -22,6 +22,8 @@ char *read_kernel(char *path) {
 		goto free_and_exit;
 	}
 	((char *)buffer)[sz] = 0;
+	if (size != NULL)
+		*size = sz;
 	return buffer;
 free_and_exit:
 	free(buffer);

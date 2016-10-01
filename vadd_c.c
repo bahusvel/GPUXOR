@@ -13,6 +13,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/types.h>
 #ifdef __APPLE__
 #include <OpenCL/opencl.h>
@@ -37,35 +38,11 @@ extern int output_device_info(cl_device_id);
 
 #define LENGTH (1024) // length of vectors a, b, and c
 
-int main(int argc, char **argv) {
+cl_device_id pick_device() {
+	int i = 0;
 	int err; // error code returned from OpenCL calls
 
-	float *h_a = (float *)calloc(LENGTH, sizeof(float)); // a vector
-	float *h_b = (float *)calloc(LENGTH, sizeof(float)); // b vector
-	float *h_c = (float *)calloc(
-		LENGTH,
-		sizeof(float)); // c vector (a+b) returned from the compute device
-
-	size_t global; // global domain size
-
-	cl_device_id device_id;	// compute device id
-	cl_context context;		   // compute context
-	cl_command_queue commands; // compute command queue
-	cl_program program;		   // compute program
-	cl_kernel ko_vadd;		   // compute kernel
-
-	cl_mem d_a; // device memory used for the input  a vector
-	cl_mem d_b; // device memory used for the input  b vector
-	cl_mem d_c; // device memory used for the output c vector
-
-	// Fill vectors a and b with random float values
-	int i = 0;
-	int count = LENGTH;
-	for (i = 0; i < count; i++) {
-		h_a[i] = rand() / (float)RAND_MAX;
-		h_b[i] = rand() / (float)RAND_MAX;
-	}
-
+	cl_device_id device_id; // compute device id
 	// Set up platform and GPU device
 
 	cl_uint numPlatforms;
@@ -75,7 +52,7 @@ int main(int argc, char **argv) {
 	checkError(err, "Finding platforms");
 	if (numPlatforms == 0) {
 		printf("Found 0 platforms!\n");
-		return EXIT_FAILURE;
+		exit(-1);
 	}
 
 	printf("Found %d platforms\n", numPlatforms);
@@ -98,6 +75,21 @@ int main(int argc, char **argv) {
 
 	err = output_device_info(device_id);
 	checkError(err, "Printing device output");
+	return device_id;
+}
+
+int main(int argc, char **argv) {
+	int err; // error code returned from OpenCL calls
+
+	size_t global; // global domain size
+
+	cl_device_id device_id;	// compute device id
+	cl_context context;		   // compute context
+	cl_command_queue commands; // compute command queue
+	cl_program program;		   // compute program
+	cl_kernel ko_vadd;		   // compute kernel
+
+	device_id = pick_device();
 
 	// Create a compute context
 	context = clCreateContext(0, 1, &device_id, NULL, NULL, &err);
@@ -107,8 +99,7 @@ int main(int argc, char **argv) {
 	commands = clCreateCommandQueue(context, device_id, 0, &err);
 	checkError(err, "Creating command queue");
 
-	char *kernel = read_kernel(
-		"/Users/denislavrov/Documents/Developing/GPUXOR/add_kernel.cl");
+	char *kernel = read_kernel("xor_kernel.cl", NULL);
 	// Create the compute program from the source buffer
 	program = clCreateProgramWithSource(context, 1, (const char **)&kernel,
 										NULL, &err);
@@ -132,40 +123,42 @@ int main(int argc, char **argv) {
 	ko_vadd = clCreateKernel(program, "vadd", &err);
 	checkError(err, "Creating kernel");
 
+	cl_mem data_buf; // device memory used for the input  a vector
+	cl_mem key_buf;  // device memory used for the input  b vector
 	// Create the input (a, b) and output (c) arrays in device memory
-	d_a = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float) * count, NULL,
-						 &err);
-	checkError(err, "Creating buffer d_a");
+	size_t data_length = 0;
+	char *data = read_kernel("add_kernel.cl", &data_length);
+	char *key = "hello";
+	size_t key_length = strlen(key);
 
-	d_b = clCreateBuffer(context, CL_MEM_READ_ONLY, sizeof(float) * count, NULL,
-						 &err);
-	checkError(err, "Creating buffer d_b");
+	data_buf =
+		clCreateBuffer(context, CL_MEM_READ_WRITE, data_length, NULL, &err);
+	checkError(err, "Creating buffer data_buf");
 
-	d_c = clCreateBuffer(context, CL_MEM_WRITE_ONLY, sizeof(float) * count,
-						 NULL, &err);
-	checkError(err, "Creating buffer d_c");
+	key_buf = clCreateBuffer(context, CL_MEM_READ_ONLY, key_length, NULL, &err);
+	checkError(err, "Creating buffer key_buf");
 
 	// Write a and b vectors into compute device memory
-	err = clEnqueueWriteBuffer(commands, d_a, CL_TRUE, 0, sizeof(float) * count,
-							   h_a, 0, NULL, NULL);
+	err = clEnqueueWriteBuffer(commands, data_buf, CL_TRUE, 0, data_length,
+							   data, 0, NULL, NULL);
 	checkError(err, "Copying h_a to device at d_a");
-
-	err = clEnqueueWriteBuffer(commands, d_b, CL_TRUE, 0, sizeof(float) * count,
-							   h_b, 0, NULL, NULL);
+	printf("Keylen %lu\n", key_length);
+	err = clEnqueueWriteBuffer(commands, key_buf, CL_TRUE, 0, key_length, key,
+							   0, NULL, NULL);
 	checkError(err, "Copying h_b to device at d_b");
 
 	// Set the arguments to our compute kernel
-	err = clSetKernelArg(ko_vadd, 0, sizeof(cl_mem), &d_a);
-	err |= clSetKernelArg(ko_vadd, 1, sizeof(cl_mem), &d_b);
-	err |= clSetKernelArg(ko_vadd, 2, sizeof(cl_mem), &d_c);
-	err |= clSetKernelArg(ko_vadd, 3, sizeof(unsigned int), &count);
+	err = clSetKernelArg(ko_vadd, 0, sizeof(cl_mem), &data_buf);
+	err |= clSetKernelArg(ko_vadd, 1, sizeof(cl_mem), &key_buf);
+	err |= clSetKernelArg(ko_vadd, 2, sizeof(unsigned int), &data_length);
+	err |= clSetKernelArg(ko_vadd, 3, sizeof(unsigned int), &key_length);
 	checkError(err, "Setting kernel arguments");
 
 	double rtime = wtime();
 
 	// Execute the kernel over the entire range of our 1d input data set
 	// letting the OpenCL runtime choose the work-group size
-	global = count;
+	global = data_length;
 	err = clEnqueueNDRangeKernel(commands, ko_vadd, 1, NULL, &global, NULL, 0,
 								 NULL, NULL);
 	checkError(err, "Enqueueing kernel");
@@ -178,25 +171,20 @@ int main(int argc, char **argv) {
 	printf("\nThe kernel ran in %lf seconds\n", rtime);
 
 	// Read back the results from the compute device
-	err = clEnqueueReadBuffer(commands, d_c, CL_TRUE, 0, sizeof(float) * count,
-							  h_c, 0, NULL, NULL);
+	err = clEnqueueReadBuffer(commands, data_buf, CL_TRUE, 0, data_length, data,
+							  0, NULL, NULL);
 	if (err != CL_SUCCESS) {
 		printf("Error: Failed to read output array!\n%s\n", err_code(err));
 		exit(1);
 	}
 
 	// cleanup then shutdown
-	clReleaseMemObject(d_a);
-	clReleaseMemObject(d_b);
-	clReleaseMemObject(d_c);
+	clReleaseMemObject(data_buf);
+	clReleaseMemObject(key_buf);
 	clReleaseProgram(program);
 	clReleaseKernel(ko_vadd);
 	clReleaseCommandQueue(commands);
 	clReleaseContext(context);
-
-	free(h_a);
-	free(h_b);
-	free(h_c);
 
 	return 0;
 }
